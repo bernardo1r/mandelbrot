@@ -1,11 +1,14 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <pthread.h>
 #include <math.h>
 
 #include <SDL.h>
 
 #define SCREEN_WIDTH 1280
 #define SCREEN_HEIGHT 720
+
+#define NUM_THREADS 6
 
 struct Coord {
     double x;
@@ -139,10 +142,11 @@ struct Game *init(void) {
 
 void input(struct Game *game) {
     SDL_Event event;
+    int x, y;
     while (SDL_PollEvent(&event)) {
         switch (event.type) {
         case SDL_MOUSEBUTTONDOWN:
-            int x, y;
+            
             x = event.button.x;
             y = event.button.y;
             switch (event.button.button) {
@@ -193,6 +197,72 @@ void input(struct Game *game) {
     }
 }
 
+struct ThreadArg {
+    struct Game *game;
+    char *pixels;
+    struct Coord left_corner;
+    size_t num_rows;
+};
+
+void *render_thread(void *args) {
+    struct ThreadArg *thread_args = args;
+
+    double x, y;
+    x = thread_args->left_corner.x;
+    y = thread_args->left_corner.y;
+    for (size_t j = 0; j < thread_args->num_rows; j++) {
+        for (size_t i = 0; i < SCREEN_WIDTH; i++, (thread_args->pixels)++) {
+            uint64_t it = 0;
+            double zy = 0, zx = 0;
+            for (; it < thread_args->game->current_it; it++) {
+                double zx2, zy2;
+                zx2 = (zx*zx - zy*zy) + x;
+                zy2 = (zx*zy + zy*zx) + y;
+                zx = zx2; zy = zy2;
+                if (zx*zx + zy*zy > 4.0) {
+                    it++;
+                    break;
+                }
+            }
+            it--;
+            const char *color = thread_args->game->colors[it];
+            *(thread_args->pixels) = color[0];
+            *(++(thread_args->pixels)) = color[1];
+            *(++(thread_args->pixels)) = color[2];
+            x += thread_args->game->step;
+        }
+        x = thread_args->left_corner.x;
+        y += thread_args->game->step;
+    }
+
+    return NULL;
+}
+
+void render_threaded(struct Game *game, char *pixels) {
+    pthread_t threads[NUM_THREADS];
+    struct ThreadArg args[NUM_THREADS];
+    size_t num_rows = SCREEN_HEIGHT / NUM_THREADS;
+    double y = game->topleft_corner.y;
+    for (int i = 0; i < NUM_THREADS; i++) {
+        args[i].game = game;
+        args[i].pixels = pixels;
+        printf("%p\n", pixels);
+        args[i].left_corner = (struct Coord) {game->topleft_corner.x, y};
+        if (i == NUM_THREADS - 1) {
+            num_rows += SCREEN_HEIGHT % NUM_THREADS;
+        }
+        args[i].num_rows = num_rows;
+
+        pixels += num_rows * SCREEN_WIDTH * 3;
+        y += game->step * ((double) num_rows);
+        pthread_create(&threads[i], NULL, render_thread, &args[i]);
+    }
+
+    for (int i = 0; i < NUM_THREADS; i++) {
+        pthread_join(threads[i], NULL);
+    }
+}
+
 void update(struct Game *game) {
     if (game->rendered) {
         input(game);
@@ -210,33 +280,7 @@ void update(struct Game *game) {
         fprintf(stderr, "Error locking SDL texture: %s\n", SDL_GetError());
         exit(1);
     }
-    double x, y;
-    x = game->topleft_corner.x;
-    y = game->topleft_corner.y;
-    for (size_t j = 0; j < SCREEN_HEIGHT; j++) {
-        for (size_t i = 0; i < SCREEN_WIDTH; i++, pixels++) {
-            uint64_t it = 0;
-            double zy = 0, zx = 0;
-            for (; it < game->current_it; it++) {
-                double zx2, zy2;
-                zx2 = (zx*zx - zy*zy) + x;
-                zy2 = (zx*zy + zy*zx) + y;
-                zx = zx2; zy = zy2;
-                if (zx*zx + zy*zy > 4.0) {
-                    it++;
-                    break;
-                }
-            }
-            it--;
-            const char *color = game->colors[it];
-            *pixels = color[0];
-            *(++pixels) = color[1];
-            *(++pixels) = color[2];
-            x += game->step;
-        }
-        x = game->topleft_corner.x;
-        y += game->step;
-    }
+    render_threaded(game, pixels);
     SDL_UnlockTexture(game->offscreen);
 
     game->rendered = 1;
